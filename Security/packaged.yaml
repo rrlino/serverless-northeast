@@ -1,0 +1,544 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM Template for Serverless SSL Checker
+Globals:
+  Function:
+    Timeout: 5
+    MemorySize: 256
+    Runtime: python3.7
+    Environment:
+      Variables:
+        DYNAMODBTABLE:
+          Ref: DynamoDbTable
+Parameters:
+  ParamMicroservice:
+    Description: Microservice name
+    Type: String
+    Default: SSLChecker
+Resources:
+  API:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: Prod
+    Metadata:
+      SamResourceId: API
+  HealthCheck:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/4c22a35b9d1980cd681aeef917b88750
+      Handler: healthcheck.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 3
+      MemorySize: 128
+      Events:
+        ApiGet:
+          Type: HttpApi
+          Timeout: 5
+          Properties:
+            Path: /HealthCheck
+            Method: get
+            ApiId:
+              Ref: API
+        ApiOptions:
+          Type: HttpApi
+          Timeout: 5
+          Properties:
+            Method: OPTIONS
+            Path: /{proxy+}
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: HealthCheck
+  List:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/cfff2be8a0b9da9bced40b0b782ab34a
+      Handler: proxy.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 10
+      Events:
+        ApiGet:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: List
+  GetById:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/708e9fab77da98ccc7a6a769154ae0cf
+      Handler: get.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Events:
+        ApiGetById:
+          Type: HttpApi
+          Properties:
+            Path: /{id}
+            Method: get
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: GetById
+  Create:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/49f0ad19eb61d03d1669c193554ebb8b
+      Handler: create.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Events:
+        ApiPost:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: post
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: Create
+  Update:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/c00442b71abaa713d7d94198fbe10a31
+      Handler: update.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Events:
+        ApiPut:
+          Type: HttpApi
+          Properties:
+            Path: /{id}
+            Method: put
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: Update
+  Delete:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/7cc9313225fcc28cc4f822d562c25d01
+      Handler: delete.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Events:
+        ApiDelete:
+          Type: HttpApi
+          Properties:
+            Path: /{id}
+            Method: delete
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: Delete
+  CheckExpired:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/6f985c2b8591b3fe29dbb94bea90dc09
+      Handler: checkExpired.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 600
+      Environment:
+        Variables:
+          QUEUE_URL:
+            Ref: EndpointsQueue
+          SSLRECHECKHOURS: 6
+      Events:
+        ApiGetById:
+          Type: HttpApi
+          Properties:
+            Path: /CheckExpired
+            Method: get
+            ApiId:
+              Ref: API
+        CheckExpiredDaily:
+          Type: Schedule
+          Properties:
+            Schedule: rate(60 minutes)
+    Metadata:
+      SamResourceId: CheckExpired
+  CheckRequestSSL:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/45733daddb448a48db56c91c244ca5ad
+      Handler: requestSSLCheck.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Environment:
+        Variables:
+          QUEUE_URL:
+            Ref: EndpointsQueue
+          DLQUEUE_URL:
+            Ref: EndpointsDeadLetterQueue
+          SSLSTEPFUNCTIONARN:
+            Ref: CheckSSLPollerStateMachine
+          SSLSTEPFUNCTIONNAME:
+            Fn::GetAtt:
+            - CheckSSLPollerStateMachine
+            - Name
+      Events:
+        ApiGetById:
+          Type: HttpApi
+          Properties:
+            Path: /RequestSSLCheck
+            Method: post
+            ApiId:
+              Ref: API
+        SqsToStepFunction:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - EndpointsQueue
+              - Arn
+            BatchSize: 10
+            Enabled: true
+    Metadata:
+      SamResourceId: CheckRequestSSL
+  CollectSSLResults:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/e414b54460f01ede47f6a0df6761c917
+      Handler: collectSSLResults.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          URLENDPOINTS: https://4c580kazfg.execute-api.eu-west-1.amazonaws.com/Prod/
+    Metadata:
+      SamResourceId: CollectSSLResults
+  SubmitSSLJob:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/785a4afbca7150fe18f83327e176e02d
+      Handler: submitSSLJob.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+    Metadata:
+      SamResourceId: SubmitSSLJob
+  CheckSSLJob:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/785a4afbca7150fe18f83327e176e02d
+      Handler: checkSSLJob.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+    Metadata:
+      SamResourceId: CheckSSLJob
+  GetByUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://rrlino-serverless/b6e59e35d5b49a6da930a73f5fb72e53
+      Handler: getByUrl.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Timeout: 10
+      Events:
+        ApiGetById:
+          Type: HttpApi
+          Properties:
+            Path: /GetByUrl/{id}
+            Method: get
+            ApiId:
+              Ref: API
+    Metadata:
+      SamResourceId: GetByUrl
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: states.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: StatesExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - sqs:*
+            Resource:
+              Fn::GetAtt:
+              - EndpointsQueue
+              - Arn
+          - Effect: Allow
+            Action:
+            - sqs:*
+            Resource:
+              Fn::GetAtt:
+              - EndpointsDeadLetterQueue
+              - Arn
+    Metadata:
+      SamResourceId: StatesExecutionRole
+  EndpointsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Sub: ${ParamMicroservice}-sslCheck
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+          - EndpointsDeadLetterQueue
+          - Arn
+        maxReceiveCount: 5
+    Metadata:
+      SamResourceId: EndpointsQueue
+  EndpointsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Sub: ${ParamMicroservice}-sslCheckDLQ
+    Metadata:
+      SamResourceId: EndpointsDeadLetterQueue
+  CheckSSLPollerStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString:
+        Fn::Sub:
+        - "{\n  \"Comment\": \"Amazon States Language that send SSLLabs SSL request\
+          \ and monitors the request until it completes.\",\n  \"StartAt\": \"Wait\
+          \ X Seconds\",\n  \"States\": {\n    \"Wait X Seconds\": {\n      \"Type\"\
+          : \"Wait\",\n      \"Seconds\" : 30,\n      \"Next\": \"Get SSL Job Status\"\
+          \n    },\n    \"Get SSL Job Status\": {\n      \"Type\": \"Task\",\n   \
+          \   \"Resource\": \"${checkJobArn}\",\n      \"Next\": \"SSL Job Complete?\"\
+          ,\n      \"InputPath\": \"$\",\n      \"ResultPath\": \"$\"\n    },\n  \
+          \  \"SSL Job Complete?\": {\n      \"Type\": \"Choice\",\n      \"Choices\"\
+          : [\n        {\n          \"Variable\": \"$.status\",\n          \"StringEquals\"\
+          : \"FAILED\",\n          \"Next\": \"Send Failed Job to DLQ\"\n        },\n\
+          \        {\n          \"Variable\": \"$.status\",\n          \"StringEquals\"\
+          : \"ERROR\",\n          \"Next\": \"Send Failed Job to DLQ\"\n        },\n\
+          \        {\n          \"Variable\": \"$.status\",\n          \"StringEquals\"\
+          : \"READY\",\n          \"Next\": \"Collect SSL Job Results\"\n        }\n\
+          \      ],\n      \"Default\": \"Wait X Seconds\"\n    },\n    \"Collect\
+          \ SSL Job Results\": {\n      \"Type\": \"Task\",\n      \"Resource\": \"\
+          ${collectJobArn}\",\n      \"InputPath\": \"$\",\n      \"End\": true\n\
+          \    },\n    \"Send Failed Job to DLQ\": {\n      \"Type\": \"Task\",\n\
+          \      \"Resource\": \"arn:aws:states:::sqs:sendMessage\",\n      \"Parameters\"\
+          : {\n        \"QueueUrl\": \"${ddqUrl}\",\n        \"MessageBody\": {\n\
+          \          \"Input.$\": \"$\"\n        }\n      },\n      \"End\": true\n\
+          \    }\n  }\n}"
+        - submitJobArn:
+            Fn::GetAtt:
+            - SubmitSSLJob
+            - Arn
+          checkJobArn:
+            Fn::GetAtt:
+            - CheckSSLJob
+            - Arn
+          collectJobArn:
+            Fn::GetAtt:
+            - CollectSSLResults
+            - Arn
+          ddqUrl:
+            Ref: EndpointsDeadLetterQueue
+      RoleArn:
+        Fn::GetAtt:
+        - StatesExecutionRole
+        - Arn
+    Metadata:
+      SamResourceId: CheckSSLPollerStateMachine
+  DynamoDbTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: Id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: Id
+        KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      TableName:
+        Fn::Sub: ${ParamMicroservice}
+    Metadata:
+      SamResourceId: DynamoDbTable
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: sts:AssumeRole
+          Principal:
+            Service:
+            - apigateway.amazonaws.com
+            - lambda.amazonaws.com
+            - sqs.amazonaws.com
+      Path: /
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+            - apigateway:*
+            - lambda:*
+            - execute-api:*
+            - s3:*
+            - states:*
+            - secretsmanager:GetSecretValue
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:dynamodb:'
+                - Ref: AWS::Region
+                - ':'
+                - Ref: AWS::AccountId
+                - :table/
+                - Ref: DynamoDbTable
+          - Effect: Allow
+            Action:
+            - sqs:*
+            Resource:
+              Fn::GetAtt:
+              - EndpointsQueue
+              - Arn
+          - Effect: Allow
+            Action:
+            - sqs:*
+            Resource:
+              Fn::GetAtt:
+              - EndpointsDeadLetterQueue
+              - Arn
+    Metadata:
+      SamResourceId: LambdaExecutionRole
+  ReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName:
+        Fn::Sub: ${ParamMicroservice}-ReadOnly
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: lambda:InvokeFunction
+          Resource:
+          - Fn::GetAtt:
+            - HealthCheck
+            - Arn
+          - Fn::GetAtt:
+            - List
+            - Arn
+          - Fn::GetAtt:
+            - GetById
+            - Arn
+          - Fn::GetAtt:
+            - GetByUrl
+            - Arn
+        - Effect: Allow
+          Action: execute-api:Invoke
+          Resource:
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/GET/*
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/GET/
+        - Effect: Deny
+          Action: execute-api:Invoke
+          Resource:
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/PUT/*
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/POST/
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/DELETE/*
+    Metadata:
+      SamResourceId: ReadOnlyPolicy
+  ReadWritePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName:
+        Fn::Sub: ${ParamMicroservice}-ReadWrite
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: lambda:InvokeFunction
+          Resource:
+          - Fn::GetAtt:
+            - HealthCheck
+            - Arn
+          - Fn::GetAtt:
+            - List
+            - Arn
+          - Fn::GetAtt:
+            - GetById
+            - Arn
+          - Fn::GetAtt:
+            - Create
+            - Arn
+          - Fn::GetAtt:
+            - Update
+            - Arn
+          - Fn::GetAtt:
+            - Delete
+            - Arn
+          - Fn::GetAtt:
+            - GetByUrl
+            - Arn
+        - Effect: Allow
+          Action: execute-api:Invoke
+          Resource:
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/GET/*
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/GET/
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/PUT/*
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/POST/
+          - Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/DELETE/*
+    Metadata:
+      SamResourceId: ReadWritePolicy
+Outputs:
+  APIHealthCheckEndpoint:
+    Description: API Gateway HealthCheck endpoint URL - Expect 200 OK
+    Value:
+      Fn::Sub: https://${API}.execute-api.${AWS::Region}.amazonaws.com/Prod/HealthCheck
